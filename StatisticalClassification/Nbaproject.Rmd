@@ -1,0 +1,503 @@
+---
+title: "NbaProject"
+author: "Javier Esteban Aragoneses"
+date: "8/12/2020"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+# Introduction
+
+In this project we want to classify the position of the basketball NBA players with his stats( points, assistances, ofensive rebounds, defensive rebounds, steals, blocks,free throws,Turnovers Per Game, field Goal Percentage,free throws per game(FT) and free throw Percentage(FT.)). In order to improve the performance of the model, we simplify the positions in three groups; guards, forwards and centers.
+
+
+```{r,echo=FALSE,results='hide'}
+library(tidyverse)
+library(data.table)
+library(MASS)
+library(e1071) 
+library(VGAM)
+library(klaR)
+library(caret)
+
+cls <- c(PTS="numeric", AST="numeric",ORB="numeric",DRB="numeric",STL="numeric", BLK="numeric",MP="numeric",PF="numeric",TOV="numeric",Pos="factor")
+
+a=read.csv2("DatosNBA.csv", header = T,colClasses = cls,dec = ".")
+
+```
+
+# Preprocess
+
+First of all, we will check that we have enough data in each group. In order to avoid outlayers, we remove the players who plays less than five minutes per game and players who doesnt have full data.    
+
+```{r,echo=FALSE}
+b=data.table(a)
+c=b[MP>=5&STL>0&BLK>0&AST>0&ORB>0&FT>0&FG.>0&FT.>0&TOV>0]
+my_data= c[, .(Pos,PTS,AST,ORB,DRB,STL,BLK,FT,FG.,FT.,TOV)]
+
+print("Number of Centers")
+my_data[Pos=="C",.N]
+print("Number of fowards")
+my_data[Pos=="F",.N]
+print("Number of Guards")
+my_data[Pos=="G",.N]
+
+```
+Effectively, there is the same order of number of data per group .Then, I compute the covariance matrix of each group
+
+```{r,echo=FALSE}
+print("Covariance of the centers")
+Center=my_data[Pos=="C"]
+Center2=Center[,.(PTS,AST,ORB,DRB,STL,BLK,FT,FG.,FT.,TOV)]
+cov(Center2)
+print("Covariance of the fowards")
+Foward=my_data[Pos=="F"]
+Foward2=Foward[,.(PTS,AST,ORB,DRB,STL,BLK,FT,FG.,FT.,TOV)]
+cov(Foward2)
+print("Covariance of the guards")
+Guards=my_data[Pos=="G"]
+Guards2=Guards[,.(PTS,AST,ORB,DRB,STL,BLK,FT,FG.,FT.,TOV)]
+cov(Guards2)
+```
+We can see that they are difference but the values have the same order.Even so, we will proceed later to standardize it. Before, to archive normality, we make transformation of the variables. After that, we recompute the covariance matrix
+
+```{r,echo=FALSE}
+my_data$PTS=log(my_data$PTS)
+my_data$AST=log(my_data$AST)
+my_data$ORB=log(my_data$ORB)
+my_data$DRB=log(my_data$DRB)
+my_data$STL=log(my_data$STL)
+my_data$FT=log(my_data$FT)
+my_data$FG.=log(my_data$FG.)
+my_data$FT.=log(my_data$FT.)
+my_data$TOV=log(my_data$TOV)
+
+
+my_data$PTS=(my_data$PTS-mean(my_data$PTS))/sd(my_data$PTS)
+my_data$AST=(my_data$AST-mean(my_data$AST))/sd(my_data$AST)
+my_data$ORB=(my_data$ORB-mean(my_data$ORB))/sd(my_data$ORB)
+my_data$DRB=(my_data$DRB-mean(my_data$DRB))/sd(my_data$DRB)
+my_data$STL=(my_data$STL-mean(my_data$STL))/sd(my_data$STL)
+my_data$FT=(my_data$FT-mean(my_data$FT))/sd(my_data$FT)
+my_data$FG.=(my_data$FG.-mean(my_data$FG.))/sd(my_data$FG.)
+my_data$FT.=(my_data$FT.-mean(my_data$FT.))/sd(my_data$FT.)
+my_data$TOV=(my_data$TOV-mean(my_data$TOV))/sd(my_data$TOV)
+
+
+my_data=data.table(my_data)
+print("Covariance of the centers")
+Center=my_data[Pos=="C"]
+Center2=Center[,.(PTS,AST,ORB,DRB,STL,BLK,FT,FG.,FT.,TOV)]
+cov(Center2)
+print("Covariance of the centers")
+Foward=my_data[Pos=="F"]
+Foward2=Foward[,.(PTS,AST,ORB,DRB,STL,BLK,FT,FG.,FT.,TOV)]
+cov(Foward2)
+print("Covariance of the centers")
+Guards=my_data[Pos=="G"]
+Guards2=Guards[,.(PTS,AST,ORB,DRB,STL,BLK,FT,FG.,FT.,TOV)]
+cov(Guards2)
+my_data=as.data.frame(my_data)
+
+```
+I plot the density function of all variables after transform in logarithm. We could see differences that we can reason a priori. 
+From all positions you can score many points, make fouls or have good shooting percentages (although centers when shooting from closer, should have a slightly higher hit percentage). However, centers, being higher, will take average more rebounds than fowards and the latter more than guards. The same, to a lesser extent, happens with blocks. However, as guards create more game than fowards they tend to give more assists than fowards and and these more than centers, something similar happens with steals,turnovers and free throw percentages.
+
+```{r,echo=FALSE}
+my_data %>% ggplot(aes(x = PTS)) +  
+  geom_density(aes(group = Pos, 
+                   colour = Pos, 
+                   fill = Pos),
+               alpha = 0.2)
+
+
+my_data %>% ggplot(aes(x = AST)) +  
+  geom_density(aes(group = Pos, 
+                   colour = Pos, 
+                   fill = Pos),
+               alpha = 0.2)
+
+
+my_data %>% ggplot(aes(x = ORB)) +  
+  geom_density(aes(group = Pos, 
+                   colour = Pos, 
+                   fill = Pos),
+               alpha = 0.2)
+
+my_data %>% ggplot(aes(x = DRB)) +  
+  geom_density(aes(group = Pos, 
+                   colour = Pos, 
+                   fill = Pos),
+               alpha = 0.2)
+
+my_data %>% ggplot(aes(x = STL)) +  
+  geom_density(aes(group = Pos, 
+                   colour = Pos, 
+                   fill = Pos),
+               alpha = 0.2)
+
+my_data %>% ggplot(aes(x = BLK)) +  
+  geom_density(aes(group = Pos, 
+                   colour = Pos, 
+                   fill = Pos),
+               alpha = 0.2)
+
+my_data %>% ggplot(aes(x = FT)) +  
+  geom_density(aes(group = Pos, 
+                   colour = Pos, 
+                   fill = Pos),
+               alpha = 0.2)
+
+my_data %>% ggplot(aes(x = FT.)) +  
+  geom_density(aes(group = Pos, 
+                   colour = Pos, 
+                   fill = Pos),
+               alpha = 0.2)
+
+my_data %>% ggplot(aes(x = FG.)) +  
+  geom_density(aes(group = Pos, 
+                   colour = Pos, 
+                   fill = Pos),
+               alpha = 0.2)
+my_data %>% ggplot(aes(x = TOV)) +  
+  geom_density(aes(group = Pos, 
+                   colour = Pos, 
+                   fill = Pos),
+               alpha = 0.2)
+```
+The hypothesis seems to be correct except with steals. Then, we proceed to make de scatterplot to see which variables will be more relevants in order to classify
+
+```{r,echo=FALSE}
+X=my_data[,2:11]
+Label=my_data[,1]
+colors.pos <- c("blue","green","orange")[Label]
+pairs(X,main="Nba data set",pch=19,col=colors.pos)
+```
+We can see that the rebounds and assistances are the most relevant variables to classify
+
+Finally we will use the staticals tools. I start with QDA. The partitions representation will be with the most important variables.
+```{r, echo=FALSE}
+qda.class.NBA <- qda(Pos ~ ., my_data, prior = c(1,1,1)/3)
+qda.class.NBA
+partimat(Pos ~.-PTS-FT-FT.-TOV-STL,data=my_data,method="qda")
+
+```
+
+The ofensive rebounds and the blocks are the best variables to classify the centers. It is logical because the center are the highest players and the can catch more rebounds and the have more facilities to block.The guards, who usually make more assistances have the higher cofficient.Now we will predict with the same data
+
+```{r,echo = FALSE}
+post.prob.qda = predict(qda.class.NBA, my_data)$posterior
+head(post.prob.qda)
+
+pred.qda = predict(qda.class.NBA, my_data)$class
+head(pred.qda)
+colors.qda.nba <- c("blue","green","orange")[pred.qda]
+pairs(X,main="Classification of possition of the nba players ",pch=19,col=colors.qda.nba)
+ConfMat.qda = table(pred.qda, my_data$Pos)
+ConfMat.qda
+n=540
+error.qda <- (n - sum(diag(ConfMat.qda))) / n
+error.qda
+
+colors.qda.results<-c("black","red")[1*(Label==pred.qda)+1]
+pairs(X,main="clasifcation result",col=colors.qda.results,pch=19)
+
+```
+Performance is quite bad because the we use the same training and predict data set and it could be so optimistic. With k-cross validation the results are:
+
+```{r,echo=FALSE}
+qda.class.nbaKC <- qda(Pos ~ ., my_data, prior = c(1,1,1)/3, CV=TRUE)
+ConfMatKC = table(Label, qda.class.nbaKC$class)
+print("confusion matrix")
+ConfMatKC
+error.qda <- (n - sum(diag(ConfMatKC))) / n
+print("error percentage")
+error.qda
+```
+The error now is acceptable beacuase with cross validation we get a more realistic error.
+
+In the next step will divide the data in training and test set. I will use 10-fold cross validation and I repeated it five times.
+
+```{r,echo=FALSE}
+ctrl <- trainControl(method = "repeatedcv", 
+                     repeats = 5,
+                     number = 10)
+spl = createDataPartition(my_data$Pos, p = 0.7, list = FALSE)   
+NBATrain = my_data[spl,]
+NBATest = my_data[-spl,]
+
+
+print("qda results")
+qdaFit <- train(Pos ~ ., 
+                method = "qda", 
+                #method = "stepQDA", 
+                #method = "QdaCov", 
+                data = NBATrain,
+                metric = "Accuracy",
+                trControl = ctrl)
+
+qdaPred = predict(qdaFit, NBATest)
+confusionMatrix(qdaPred, NBATest$Pos)
+
+qda_imp <- varImp(qdaFit, scale = F)
+plot(qda_imp,main="qda variables importance", scales = list(y = list(cex = .95)))
+
+
+
+
+
+
+
+
+```
+
+The accuracy is acceptable. Kappa is not good, but we work with balance groups so its not important. Afterwards, we do the same with step QDA.
+
+```{r,echo=FALSE}
+stepqdaFit <- train(Pos ~ ., 
+                method = "stepQDA", 
+                #method = "QdaCov", 
+                data = NBATrain,
+                metric = "Accuracy",
+                trControl = ctrl)
+print("step qda results")
+stepqdaPred = predict(stepqdaFit, NBATest)
+confusionMatrix(stepqdaPred, NBATest$Pos)
+
+stepqda_imp <- varImp(stepqdaFit, scale = F)
+plot(stepqda_imp,main="Step qda variables importance", scales = list(y = list(cex = .95)))
+
+```
+Step QDA performance worse. Now I check QDACOV method
+
+```{r,echo=FALSE}
+CovqdaFit <- train(Pos ~ ., 
+                method = "QdaCov", 
+                data = NBATrain,
+                metric = "Accuracy",
+                trControl = ctrl)
+print("Covqda results")
+
+CovqdaPred = predict(CovqdaFit, NBATest)
+confusionMatrix(CovqdaPred, NBATest$Pos)
+
+Covqda_imp <- varImp(CovqdaFit, scale = F)
+plot(Covqda_imp,main="Cov qda variables importance", scales = list(y = list(cex = .95)))
+
+```
+
+
+The results are satisfactory. I get the best results with simple qda. It should be noted that the percentage of success has a greater importance than what we predicted.
+Now do the same with LDA.  I have done many preprocess that must improve the LDA performance; I have removed the outliers, I have standardized the data and have taken logarithm in order to get normality.
+
+
+
+Now do the same with LDA 
+
+```{r,echo=FALSE}
+lda.Pos.Nba <- lda(Pos ~ ., my_data, prior = c(1,1,1)/3)
+lda.Pos.Nba
+plot(lda.Pos.Nba)
+library(klaR)
+partimat(Pos ~.-PTS-FT-FT.-TOV-STL,data=my_data,method="lda")
+
+
+```
+Conclusion are similar than with qda.
+```{r, echo=FALSE}
+post.prob.lda = predict(lda.Pos.Nba, my_data)$posterior
+head(post.prob.lda)
+
+pred.lda = predict(lda.Pos.Nba, my_data)$class
+head(pred.lda)
+colors.lda.nba <- c("blue","green","orange")[pred.lda]
+pairs(X,main="Classification of possition of the nba players ",pch=19,col=colors.lda.nba)
+ConfMat.lda = table(pred.lda, my_data$Pos)
+ConfMat.lda
+error.lda <- (n - sum(diag(ConfMat.lda))) / n
+error.lda
+
+```
+
+The performance is similar even though we simplify the model
+```{r,echo=FALSE}
+lda.class.nbaKC <- lda(Pos ~ ., my_data, prior = c(1,1,1)/3, CV=TRUE)
+lConfMatKC = table(Label, lda.class.nbaKC$class)
+lConfMatKC
+error.ldakc <- (n - sum(diag(lConfMatKC))) / n
+error.ldakc
+
+```
+```{r,echo=FALSE}
+ldaFit <- train(Pos ~ ., 
+                method = "lda", 
+                #method = "PenalizedLDA", 
+                #method = "sparseLDA", 
+                #method = "stepLDA", 
+                data = NBATrain,
+                metric = "Accuracy",
+                trControl = ctrl)
+ldaPred = predict(ldaFit, NBATest)
+confusionMatrix(ldaPred,NBATest$Pos)
+lda_imp <- varImp(ldaFit, scale = F)
+plot(lda_imp, scales = list(y = list(cex = .95)))
+```
+
+With LDA I get the best accuracy and kappa because the preprocessing was good. I will use instead of LDA sparseLDA.
+
+```{r,echo=FALSE}
+SldaFit  <- train(Pos ~ ., 
+                method = "sparseLDA", 
+                #method = "stepLDA", 
+                data = NBATrain,
+                metric = "Accuracy",
+
+                trControl = ctrl)
+
+SldaPred = predict(SldaFit, NBATest)
+confusionMatrix(SldaPred,NBATest$Pos)
+Slda_imp <- varImp(SldaFit, scale = F)
+plot(Slda_imp, scales = list(y = list(cex = .95)))
+```
+The results with sparseLDA are slightly worse. Now we try stepLDA.
+
+```{r,echo=0,results="hide"}
+stepldaFit  <- train(Pos ~ ., 
+                method = "stepLDA", 
+                data = NBATrain,
+                metric = "Accuracy",
+
+                trControl = ctrl)
+
+
+```
+The results are worse.
+Now I make the same with naïve bayes With 10 kross validation repeated five times and divided in data and training sets. In this case, the variables are not enough independent. 
+
+```{r,echo=FALSE}
+stepldaPred = predict(stepldaFit, NBATest)
+confusionMatrix(stepldaPred,NBATest$Pos)
+steplda_imp <- varImp(stepldaFit, scale = F)
+plot(steplda_imp, scales = list(y = list(cex = .95)))
+```
+```{r,echo=FALSE}
+N.class.NBA <- naiveBayes(Pos ~ ., my_data, prior = c(1,1,1)/3)
+N.class.NBA
+```
+
+
+```{r,echo=FALSE}
+
+NFit  <- train(Pos ~ ., 
+                method = "naive_bayes", 
+                data = NBATrain,
+                metric = "Accuracy",
+
+                trControl = ctrl)
+
+NPred = predict(NFit, NBATest)
+confusionMatrix(NPred,NBATest$Pos)
+N_imp <- varImp(NFit, scale = F)
+plot(N_imp, scales = list(y = list(cex = .95)))
+```
+```{r, echo=FALSE, results='hide'}
+GLFit <- train(Pos ~ ., 
+                method = "glmnet",
+                family = "multinomial",
+                data = NBATrain,
+                tuneGrid = expand.grid(alpha = seq(0, 2, 0.1), lambda = seq(0, .1, 0.01)),
+                metric = "Accuracy",
+                trControl = ctrl)
+print(GLFit)
+```
+The results are worse than with LDA
+
+Finally we finish with logistic regression. It works better with only two groups, but works acceptable with three. There are some variables like points per game and faults pero game that are not significant to classify and they introduce a large bias. Nevertheless, I introduce it inorder to compare all models with the same variables.
+
+```{r,echo=FALSE}
+GLPred = predict(GLFit, NBATest)
+confusionMatrix(GLPred,NBATest$Pos)
+GL_imp <- varImp(GLFit, scale = F)
+plot(GL_imp, scales = list(y = list(cex = .95)))
+```
+
+With lda i have the best perofromance
+
+Finally with best model(lda) I resume with cost-sensitive learning. Classify a guard like a center or viceversa is worse than classy a center or a guard like a foward beacuse sometimes fowars could play like a center or like a guard.Therefore, i will imput a bigger cost to this kind of failures.
+
+
+```{r,echo=FALSE}
+relative.cost <- c(0.7, 1.2, 1.5, 0.1, 1.2, 1.5,0.7, 1.2, 1.5)
+j=0;
+cost.i = matrix(NA, nrow = 30, ncol = 9)
+
+for (threshold in seq(0.45,0.85,0.05)){
+
+  j <- j + 1
+  cat(j)
+  for(i in 1:30){
+
+    
+    d <- createDataPartition(my_data$Pos, p = 0.8, list = FALSE)
+
+    train<-my_data[d,]
+    test <-my_data[-d,]  
+    
+    ldaFit <- train(Pos ~ ., 
+                    method = "lda", 
+                    data = train,
+                    metric = "Accuracy",
+                    trControl = ctrl)
+    lrProb = predict(ldaFit, test, type="prob")
+    
+    lrPred = rep("F", nrow(test))
+    lrPred[which(lrProb[,1] > threshold)] = "C"
+    lrPred[which(lrProb[,3] > threshold)] = "G"
+    lrPred = factor(lrPred)
+    
+    CM = confusionMatrix(lrPred, test$Pos)$table
+    
+    cost.i[i,j] <- sum(relative.cost*CM)/nrow(test) # unitary cost
+    
+  }
+}
+
+
+```
+```{r,echo=FALSE}
+boxplot(cost.i, main = "Hyper-parameter selection",
+        ylab = "cost",
+        xlab = "threshold value",names = seq(0.45,0.85,0.05),col="royalblue2")
+```
+
+The best performance is with threshold=0.6
+```{r,echo=FALSE}
+# optimal threshold
+threshold = 0.6
+
+# final prediction
+ldaFit <- train(Pos ~ ., 
+                #method = "lda", 
+                #method = "PenalizedLDA", 
+                method = "sparseLDA", 
+                #method = "stepLDA", 
+                data = NBATrain,
+                metric = "Accuracy",
+                trControl = ctrl)
+ldaPred = predict(ldaFit, NBATest)
+
+lrProb = predict(ldaFit, newdata=NBATest, type="prob")
+lrPred = rep("F", nrow(NBATest))
+lrPred[which(lrProb[,1] > threshold)] = "C"
+lrPred[which(lrProb[,3] > threshold)] = "G"
+lrPred = as.factor(lrPred)
+CM = confusionMatrix(lrPred, NBATest$Pos)$table
+CM
+print("unitary cost")
+sum(relative.cost*CM)/nrow(NBATest) # unitary cost
+```
+```
+
+
+

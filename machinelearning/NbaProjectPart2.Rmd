@@ -1,0 +1,603 @@
+---
+title: "NbaProject"
+author: "Javier Esteban Aragoneses"
+output: word_document
+---
+
+# Project part 2
+
+```{r,results='hide',message=FALSE,warning=FALSE,echo=FALSE}
+library(tidyverse)
+library(skimr)
+library(forcats)
+library(VIM)
+library(GGally)
+library(MASS)
+library(caret)
+library(randomForest)
+library(gbm)
+library(neuralnet)
+library(data.table)
+library(mgcv)
+library(SemiPar)
+library(rpart.plot)
+
+```
+
+```{r,message=FALSE,warning=FALSE,echo=FALSE,echo=FALSE}
+cls <- c(PTS="numeric", AST="numeric",ORB="numeric",DRB="numeric",STL="numeric", BLK="numeric",MP="numeric",PF="numeric",TOV="numeric",Pos="factor")
+
+a=read.csv2("DatosNBA.csv", header = T,colClasses = cls,dec = ".")
+b=data.table(a)
+c=b[MP>=5&STL>0&BLK>0&AST>0&ORB>0&FT>0&FG.>0&FT.>0&TOV>0]
+my_data= c[, .(Pos,PTS,AST,ORB,DRB,STL,BLK,FT,FG.,FT.,TOV)]
+```
+Firt, we will check if our sistem is close to be linear.
+
+```{r}
+model=gam(Pos ~s(AST)+s(PTS)+s(DRB)+s(ORB)+s(DRB)+s(STL)+s(BLK)+s(FT)+s(FG.)+s(FT.)+s(TOV),
+    data = my_data,
+    family = binomial,
+    method = "REML",
+    select=TRUE
+    
+    )
+summary(model)
+```
+All edf variables are close to one except TOV and FT so this variables have not a linear relationship with the response.
+
+Now I will create a data partition with 80% por our data to train, because we have only 540 observations
+```{r}
+in_train <- createDataPartition(my_data$Pos, p = 0.8, list = FALSE)  
+training <- my_data[ in_train,]
+testing <- my_data[-in_train,]
+nrow(training)
+nrow(testing)
+```
+Then I will create a cost function. In order to create that, I have to take in account that classify a center like a guard and viceversa are worse that classify a foward like a center or a guard and viceversa. with this data, I calculate the naive cost results, taking into account that there are more fowards than center and guards and there are 41 guards and 23 centers in the data  .
+
+```{r}
+print("number of players by position in the data testing set ")
+table(testing$Pos)
+
+cost.unit <- c(0, 0.5, 1, 0.5, 0, 0.5,1, 0.5, 0)
+relative.cost=cost.unit
+print("cost")
+cost=0.5*(23+41)
+cost
+
+```
+The economic profit and control function is:
+```{r}
+EconomicProfit <- function(data, lev = NULL, model = NULL) 
+{
+  y.pred = data$pred 
+  y.true = data$obs
+  CM = confusionMatrix(y.pred, y.true)$table
+  out = sum(cost.unit*CM)/sum(CM)
+  names(out) <- c("EconomicProfit")
+  out
+}
+ctrl <- trainControl(method = "cv", number = 5,
+                     classProbs = TRUE, 
+                     summaryFunction = EconomicProfit,
+                     verboseIter=T)
+```
+First I will use the knn classification tool.This method have a good perfomance with highly no linear relationship and with modearte p/n. However, our model is slightly linear and have no enough n/p. So this is not the better tools to our problem.Nevetheless, this tools wotks good with less than 5 classification groups and in this case we have only three. The hyperparameter tunning will be use to know the optimal k. 
+```{r,message=FALSE,warning=FALSE,results='hide'}
+knnFit <- train(Pos ~ ., 
+                method = "knn", 
+                data = training,
+                preProcess = c("center", "scale"),
+                tuneLength = 5,
+                metric = "EconomicProfit",
+                maximize=FALSE,
+                trControl = ctrl)
+print(knnFit)
+```
+The better result is with k=9.The importance of the variables for knn are:
+```{r}
+knn_imp <- varImp(knnFit, scale = F)
+plot(knn_imp,main="knn variables importance", scales = list(y = list(cex = .95)))
+```
+We can see that the most important variables to classify centers and guards are blocks and offensive rebounds, statics that are higher for the tallest players(centers). Then assistance,field Goal Percentage and defensive rebounds helps us to classify because guards usually give more assistance than forwards and forwards more than centers. With FG. and DRB we have the opposite situation.
+Checking the predictions:
+```{r}
+knnPred = predict(knnFit, testing)
+confusionMatrix(knnPred,testing$Pos)
+cost=sum(cost.unit*confusionMatrix(knnPred,testing$Pos)$table)
+cost
+```
+The accuracy is acceptable and the cost is reduce from 32 of the the naive classification to 10.The kappa is also high. Now I will check the best threshold
+```{r,results='hide',message=FALSE,warning=FALSE}
+j=0;
+cost.i = matrix(NA, nrow = 10, ncol = 13)
+for (threshold in seq(0.2,0.8,0.05)){
+  
+  j <- j + 1
+  cat(j)
+  for(i in 1:10){
+    
+    
+    d <- createDataPartition(my_data$Pos, p = 0.8, list = FALSE)
+    
+    train<-my_data[d,]
+    test <-my_data[-d,]  
+    
+    knnfit <- train(Pos ~ ., 
+                    method = "knn", 
+                    data = train,
+                preProcess = c("center", "scale"),
+                tuneLength = 5,
+                maximize = F,
+                metric = "EconomicProfit",
+                trControl = ctrl)
+    knnProb = predict(knnfit, test, type="prob")
+    
+    knnPred = rep("F", nrow(test))
+    knnPred[which(knnProb[,1] > threshold)] = "C"
+    knnPred[which(knnProb[,3] > threshold)] = "G"
+    knnPred = factor(knnPred)
+    
+    CM = confusionMatrix(knnPred, test$Pos)$table
+    
+    cost.i[i,j] <- sum(relative.cost*CM)/nrow(test) # unitary cost
+    
+  }
+}
+```
+```{r,echo=FALSE}
+boxplot(cost.i, main = "Hyper-parameter selection",
+        ylab = "cost",
+        xlab = "threshold value",names = seq(0.2,0.8,0.05),col="royalblue2")
+```
+We get the best results with 0.45 threshold
+```{r}
+threshold = 0.45
+knnProb = predict(knnfit, newdata=testing, type="prob")
+knnPred = rep("F", nrow(testing))
+knnPred[which(knnProb[,1] > threshold)] = "C"
+knnPred[which(knnProb[,3] > threshold)] = "G"
+knnPred = as.factor(knnPred)
+confusionMatrix(knnPred, testing$Pos)
+CM = confusionMatrix(knnPred, testing$Pos)$table
+print(" cost")
+sum(relative.cost*CM)
+```
+The total cost is reduced by one unit and the accuracy is much better.
+
+Lets continue with svm. This tool is better with no linear predictors. However we have seen that there are some linear variables. This tool should be better because doesnt need a moderate p/n ratio. i Wil make hyperpameter tuning with the same control function.
+```{r,results='hide',message=FALSE,warning=FALSE}
+svmFit <- train(Pos ~., method = "svmRadial", 
+                data = training,
+                preProcess = c("center", "scale"),
+                tuneGrid = expand.grid(C = seq(from = 0.05, to = 1, by = 0.1),
+                                      sigma = seq(from = 0.05, to = 1, by = 0.1)), 
+                metric = "EconomicProfit",
+                maximize= F,
+                trControl = ctrl)
+
+```
+The best parameters are sigma=0.15 and c=0.95. It means that we penalize the error more than the gapp. Now we check the imporance of the variables
+```{r}
+svm_imp <- varImp(svmFit, scale = F)
+plot(svm_imp,main="svm variables importance", scales = list(y = list(cex = .95)))
+```
+The variables have similar importance than with knn. The cost is:
+```{r}
+svmPred = predict(svmFit, testing)
+confusionMatrix(svmPred,testing$Pos)
+cost=sum(cost.unit*confusionMatrix(svmPred,testing$Pos)$table)
+cost
+```
+Svm have very similar results. Now i will check the best threshold with the optimal parameters. Accuracy and kappa are good.
+```{r,results='hide',message=FALSE,warning=FALSE}
+j=0;
+cost.i = matrix(NA, nrow = 10, ncol = 13)
+for (threshold in seq(0.2,0.8,0.05)){
+  
+  j <- j + 1
+  cat(j)
+  for(i in 1:10){
+    
+    
+    d <- createDataPartition(my_data$Pos, p = 0.8, list = FALSE)
+    
+    train<-my_data[d,]
+    test <-my_data[-d,]  
+    
+    svmfit <- train(Pos ~ ., 
+                    method = "svmRadial", 
+                    data = train,
+                preProcess = c("center", "scale"),
+                tuneLength = 5,
+                maximize = F,
+                tuneGrid = expand.grid(C = 0.95,
+                sigma = 0.15), 
+                metric = "EconomicProfit",
+                trControl = ctrl)
+    svmProb = predict(svmfit, test, type="prob")
+    
+    svmPred = rep("F", nrow(test))
+    svmPred[which(svmProb[,1] > threshold)] = "C"
+    svmPred[which(svmProb[,3] > threshold)] = "G"
+    svmPred = factor(svmPred)
+    
+    CM = confusionMatrix(knnPred, test$Pos)$table
+    
+    cost.i[i,j] <- sum(relative.cost*CM)/nrow(test) # unitary cost
+    
+  }
+}
+```
+```{r}
+boxplot(cost.i, main = "Hyper-parameter selection",
+        ylab = "cost",
+        xlab = "threshold value",names = seq(0.2,0.8,0.05),col="royalblue2")
+```
+The best threshold is  0.55. The cost with it is:
+```{r}
+threshold = 0.5
+svmProb = predict(svmFit, newdata=testing, type="prob")
+svmPred = rep("F", nrow(testing))
+svmPred[which(svmProb[,1] > threshold)] = "C"
+svmPred[which(svmProb[,3] > threshold)] = "G"
+svmPred = as.factor(svmPred)
+confusionMatrix(svmPred, testing$Pos)
+confusionMatrix(svmPred, testing$Pos)$table
+CM
+print(" cost")
+sum(relative.cost*CM)
+```
+With this threeshold we have a better performance that with knn.
+
+Then, I will use Decision tree. In this case I will not make hyperàrameter tuning because i will use this method only to interpret, in order to predict it would be better to use random forest.
+```{r,message=FALSE,warning=FALSE, result='hide'}
+set.seed(1)
+tree.fit <- train(Pos~., 
+                   data = training, 
+                   method = "rpart",
+                  trControl = ctrl,
+                  metric = "EconomicProfit",
+                  maximize=FALSE,
+                   tuneLength=10)
+tree.fit
+
+
+```
+
+```{r}
+rpart.plot(tree.fit$finalModel)
+
+treeProb = predict(tree.fit, newdata=testing, type="prob")
+treePred = rep("F", nrow(testing))
+treePred[which(treeProb[,1] > threshold)] = "C"
+treePred[which(treeProb[,3] > threshold)] = "G"
+treePred = as.factor(treePred)
+CM = confusionMatrix(treePred, testing$Pos)$table
+cost = sum(as.vector(CM)*cost.unit)
+cost
+```
+The cost is high but it does not matters because we use this technique  to interpret. We can see how it works: When the number of offensive rebounds is bigger than 1.2, and the number of assistance are less than 1.4, the algorithm classify the observation like a center. However, if the player have more of 1.4 assistance per game, only classify like center if the player has more than 0.76 blocks per game. We can see all the classification criteria following the scheme.
+
+Now I will use random forest. I will try, 2,3,4,5 and 6 variables by chance per node. Futhermore, we know that is more likely to be a guard or forward than center. We reflect that in the cutoff.I will use 10000 trees because is the bigger number with witch my computer could work quickly.
+```{r,message=FALSE,warning=FALSE,results='hide'}
+rf.train <- train(Pos ~., 
+                  method = "rf", 
+                  data = training,
+                  preProcess = c("center", "scale"),
+                  ntree = 10000,
+                  cutoff=c(2/9,7/18,7/18),
+                  tuneGrid = expand.grid(mtry=c(2,3,4,5,6)), 
+                  metric = "EconomicProfit",
+                  maximize = F,
+                  trControl = ctrl)
+```
+Is better to use only two variables by chance.
+
+```{r}
+rf_imp <- varImp(rf.train, scale = F)
+plot(rf_imp,main="random forest variables importance", scales = list(y = list(cex = .95)))
+```
+The variable importance is also similar.
+```{r}
+rfPred = predict(rf.train, testing)
+confusionMatrix(rfPred,testing$Pos)
+cost=sum(cost.unit*confusionMatrix(rfPred,testing$Pos)$table)
+cost
+```
+The accuracy,kappa and the cost are the worst. Now I will search the best theshold
+```{r,results='hide',message=FALSE,warning=FALSE}
+j=0;
+cost.i = matrix(NA, nrow = 10, ncol = 13)
+for (threshold in seq(0.2,0.8,0.05)){
+  
+  j <- j + 1
+  cat(j)
+  for(i in 1:10){
+    
+    
+    d <- createDataPartition(my_data$Pos, p = 0.8, list = FALSE)
+    
+    train<-my_data[d,]
+    test <-my_data[-d,]  
+    
+    rffit <- train(Pos ~ ., 
+                    method = "rf", 
+                    data = train,
+                preProcess = c("center", "scale"),
+                 ntree = 1000,
+                cutoff=c(2/9,7/18,7/18),
+                  tuneGrid = expand.grid(mtry=2), 
+                  metric = "EconomicProfit",
+                  maximize = F,
+                  trControl = ctrl)
+    rfProb = predict(rffit, test, type="prob")
+
+    rfPred = rep("F", nrow(test))
+    rfPred[which(rfProb[,1] > threshold)] = "C"
+    rfPred[which(rfProb[,3] > threshold)] = "G"
+    rfPred = factor(rfPred)
+    
+    CM = confusionMatrix(rfPred, test$Pos)$table
+    
+    cost.i[i,j] <- sum(relative.cost*CM)/nrow(test) # unitary cost
+    
+  }
+}
+```
+
+```{r}
+boxplot(cost.i, main = "Hyper-parameter selection",
+        ylab = "cost",
+        xlab = "threshold value",names = seq(0.2,0.8,0.05),col="royalblue2")
+```
+The best threshold is 0.5
+
+```{r}
+threshold = 0.5
+svmProb = predict(svmFit, newdata=testing, type="prob")
+svmPred = rep("F", nrow(testing))
+svmPred[which(svmProb[,1] > threshold)] = "C"
+svmPred[which(svmProb[,3] > threshold)] = "G"
+svmPred = as.factor(svmPred)
+CM = confusionMatrix(svmPred, testing$Pos)$table
+CM
+print(" cost")
+sum(relative.cost*CM)
+```
+This is the worse tool for our problem because have the biggest cost
+
+Then , I will use gradient boosting. This should have a great perfomance. The problem would be the computational cost. However, I select a range of parameters enough small to my computer can deal with it. 
+
+```{r,message=FALSE,warning=FALSE,results='hide'}
+xgb_grid = expand.grid(
+  nrounds = c(500,1000),
+  eta = seq(from = 0.04, to = 0.16, by = 0.04), 
+  max_depth = c(2, 4, 6),
+  gamma = 1,
+  colsample_bytree = seq(from = 0.1, to = 0.5, by = 0.5),
+  min_child_weight = seq(from = 0.5, to = 5, by = 1),
+  subsample = 1
+)
+
+xgb.train = train(Pos ~ .,  data=training,
+                  trControl = ctrl,
+                  metric="EconomicProfit",
+                  maximize = F,
+                  tuneGrid = xgb_grid,
+                  preProcess = c("center", "scale"),
+                  method = "xgbTree"
+)
+
+```
+The most importance variables are:
+```{r}
+xgb_imp <- varImp(xgb.train, scale = F)
+plot(xgb_imp,main="Xgb variables importance", scales = list(y = list(cex = .95)))
+```
+In this case, FG are most importance than blocks, unlike the others tools.
+with the best parameters, I will search the best threshold
+```{r,results='hide',message=FALSE,warning=FALSE}
+xgb_grid = expand.grid(
+  nrounds = 500,
+  eta = 0.12, 
+  max_depth = 2,
+  gamma = 1,
+  colsample_bytree = 0.1,
+  min_child_weight = 1.5,
+  subsample = 1
+)
+j=0;
+cost.i = matrix(NA, nrow = 10, ncol = 13)
+for (threshold in seq(0.2,0.8,0.05)){
+  
+  j <- j + 1
+  cat(j)
+  for(i in 1:10){
+    
+    
+    d <- createDataPartition(my_data$Pos, p = 0.8, list = FALSE)
+    
+    train<-my_data[d,]
+    test <-my_data[-d,]  
+    
+    xgb.train = train(Pos ~ .,  data=train,
+                  trControl = ctrl,
+                  metric="EconomicProfit",
+                  maximize = F,
+                  tuneGrid = xgb_grid,
+                  preProcess = c("center", "scale"),
+                  method = "xgbTree"
+)
+    xgbProb = predict(xgb.train, test, type="prob")
+
+    xgbPred = rep("F", nrow(test))
+    xgbPred[which(xgbProb[,1] > threshold)] = "C"
+    xgbPred[which(xgbProb[,3] > threshold)] = "G"
+    xgbPred = factor(xgbPred)
+    
+    CM = confusionMatrix(xgbPred, test$Pos)$table
+    
+    cost.i[i,j] <- sum(relative.cost*CM)/nrow(test) # unitary cost
+    
+  }
+}
+
+```
+
+```{r}
+boxplot(cost.i, main = "Hyper-parameter selection",
+        ylab = "cost",
+        xlab = "threshold value",names = seq(0.2,0.8,0.05),col="royalblue2")
+```
+```{r}
+threshold = 0.45
+xgbProb = predict(xgb.train, newdata=testing, type="prob")
+xgbPred = rep("F", nrow(testing))
+xgbPred[which(xgbProb[,1] > threshold)] = "C"
+xgbPred[which(xgbProb[,3] > threshold)] = "G"
+xgbPred = as.factor(xgbPred)
+confusionMatrix(xgbPred, testing$Pos)
+CM = confusionMatrix(xgbPred, testing$Pos)$table
+print(" cost")
+sum(relative.cost*CM)
+```
+The results with this tools are the best by far. The accucary and kappa are amazing and the cost is very low. 
+
+The last method to use is neural network. We will use shallow learning beacuse I will use only one hidden layer 
+```{r,results='hide',message=FALSE,warning=FALSE}
+nn.train <- train(Pos ~., 
+                  method = "nnet", 
+                  data = training,
+                  preProcess = c("center", "scale"),
+                  MaxNWts = 1000,
+                  maxit = 100,
+                  tuneGrid = expand.grid(size=seq(from = 2, to = 10, by = 20),decay= seq(from = 0.001, to = 0.01, by = 0.001)), 
+                  metric = "EconomicProfit",
+                  maximize = F,
+                  trControl = ctrl)
+
+```
+We get the best performance with size=2, decay=0.002. Now we will see the variable importance
+```{r}
+rf_imp <- varImp(rf.train, scale = F)
+plot(rf_imp,main="random forest variables importance", scales = list(y = list(cex = .95)))
+```
+For this tool, the second most importance variable is asitnce and FG is better than blocks. Now I check the accuracy
+
+```{r}
+nnPred = predict(nn.train, testing)
+confusionMatrix(nnPred,testing$Pos)
+cost=sum(cost.unit*confusionMatrix(nnPred,testing$Pos)$table)
+cost
+```
+Accuracy, kappa and cost are similar than svm and knn
+
+Now I search the best threshold
+```{r,results='hide',message=FALSE,warning=FALSE}
+j=0;
+cost.i = matrix(NA, nrow = 10, ncol = 13)
+for (threshold in seq(0.2,0.8,0.05)){
+  
+  j <- j + 1
+  cat(j)
+  for(i in 1:10){
+    
+    
+    d <- createDataPartition(my_data$Pos, p = 0.8, list = FALSE)
+    
+    train<-my_data[d,]
+    test <-my_data[-d,]  
+    
+nn.train <- train(Pos ~., 
+                  method = "nnet", 
+                  data = train,
+                  preProcess = c("center", "scale"),
+                  MaxNWts = 1000,
+                  maxit = 100,
+                  tuneGrid = expand.grid(size=2,decay= 0.02), 
+                  metric = "EconomicProfit",
+                  maximize = F,
+                  trControl = ctrl)
+    nnProb = predict(nn.train, test, type="prob")
+
+    nnPred = rep("F", nrow(test))
+    nnPred[which(nnProb[,1] > threshold)] = "C"
+    nnPred[which(nnProb[,3] > threshold)] = "G"
+    nnPred = factor(nnPred)
+    
+    CM = confusionMatrix(xgbPred, test$Pos)$table
+    
+    cost.i[i,j] <- sum(relative.cost*CM)/nrow(test) # unitary cost
+    
+  }
+}
+```
+
+```{r}
+boxplot(cost.i, main = "Hyper-parameter selection",
+        ylab = "cost",
+        xlab = "threshold value",names = seq(0.2,0.8,0.05),col="royalblue2")
+
+```
+The best threshold is 0.35
+```{r}
+threshold = 0.35
+nnProb = predict(nn.train, newdata=testing, type="prob")
+nnPred = rep("F", nrow(testing))
+nnPred[which(nnProb[,1] > threshold)] = "C"
+nnPred[which(nnProb[,3] > threshold)] = "G"
+nnPred = as.factor(nnPred)
+confusionMatrix(nnPred, testing$Pos)
+CM = confusionMatrix(nnPred, testing$Pos)$table
+print(" cost")
+sum(relative.cost*CM)
+```
+The cost is the highest and accuracy and kappa are not good enough. Probably we need more hidden layers so now i will check deep learning with three hidden layers and one hidden_dropout in ourder to avoid over fitting. The problem could be that we dont have enough data to feed our nets
+```{r,results='hide',message=FALSE,warning=FALSE}
+dnn.train <- train(Pos ~., 
+                  method = "dnn", 
+                  data = training,
+                  preProcess = c("center", "scale"),
+                  numepochs = 20, # number of iterations on the whole training set
+                  tuneGrid = expand.grid(layer1 = 2:10,
+                                         layer2 = 2:10,
+                                         layer3 = 2:10,
+                                         hidden_dropout = 1, 
+                                         visible_dropout = 0),
+                  metric = "EconomicProfit",
+                  maximize = F,
+                  trControl = ctrl)
+```
+```{r}
+dnn_imp <- varImp(dnn.train, scale = F)
+plot(dnn_imp,main="knn variables importance", scales = list(y = list(cex = .95)))
+```
+The variable importance is similar to knn and svm
+```{r}
+DnnPred = predict(dnn.train, testing)
+confusionMatrix(DnnPred,testing$Pos)
+cost=sum(cost.unit*confusionMatrix(DnnPred,testing$Pos)$table)
+cost
+```
+The accuracy, kappa and cost are like a naive classifier. I discard this method because the problem is that we need a big data data set in order to make that deep learning works enough good. 
+
+My best model by far is xglm, so I decide to build a ensemble mode with knn, svm , and shallow learning and see how it works and if it can get the results of  
+```{r}
+ensemble.prob1 = (knnProb[,1]+ svmProb[,1] + rfProb[,1]+nnProb[,1])/4 
+ensemble.prob3 = (knnProb[,3]+ svmProb[,3] + rfProb[,3] + nnProb[,3])/4 
+totalPred = rep("F", nrow(test))
+totalPred[which(ensemble.prob1 > 0.5)] = "C"
+totalPred[which(ensemble.prob3 > 0.5)] = "G"
+totalPred = factor(totalPred)
+confusionMatrix(totalPred, testing$Pos)
+CM = confusionMatrix(totalPred, testing$Pos)$table
+print(" cost")
+sum(relative.cost*CM)
+```
+The accuracy, cost and kappa are good but doesnt have the peromace of xgb_grid
+
+```
+
+
